@@ -103,3 +103,73 @@ async fn main() {
         .unwrap_or_default();
     let mut offset: i64 = 0;
     println!("Бот запущен");
+
+loop {
+        let res = tg(&c, &token, "getUpdates",
+            json!({"offset": offset, "timeout": 50, "allowed_updates": ["message"]})).await;
+        let Some(updates) = res["result"].as_array() else {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            continue;
+        };
+
+        for u in updates {
+            offset = u["update_id"].as_i64().unwrap_or(offset) + 1;
+            let m = &u["message"];
+            let Some(cid) = m["chat"]["id"].as_i64() else { continue };
+            let mid = m["message_id"].as_i64();
+            let ctype = m["chat"]["type"].as_str().unwrap_or("");
+
+            if (ctype == "group" || ctype == "supergroup")
+                && m["from"]["is_bot"].as_bool() != Some(true)
+            {
+                if let (Some(id), Some(name)) =
+                    (m["from"]["id"].as_i64(), m["from"]["first_name"].as_str())
+                {
+                    users.entry(cid.to_string()).or_default()
+                        .insert(id.to_string(), name.to_string());
+                    let _ = fs::write(DB, serde_json::to_string(&users).unwrap());
+                }
+            }
+
+            let Some(text) = m["text"].as_str() else { continue };
+            if !text.starts_with('/') { continue; }
+            let (cmd, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+            let cmd = cmd.split('@').next().unwrap_or("").to_lowercase();
+            let rest = rest.trim();
+
+            match cmd.as_str() {
+                "/battle" => {
+                    let topic = if rest.is_empty() { "кто сильнее моггает" } else { rest };
+                    let hype = ai(&c, SYSTEM, &format!(
+                        "Напиши короткий боевой призыв на дружеский моггинг-батл всех участников чата. \
+                         Тема: {topic}. Предложи 3 шуточных раунда (поза, стиль, аура). 5-6 строк.")).await;
+                    let t = tags(&c, &token, &users, cid).await;
+                    send(&c, &token, cid, &hype, None, &t).await;
+                }
+                "/mog" => {
+                    let q = if rest.is_empty() { "Дай 5 базовых советов по моггингу для новичка" } else { rest };
+                    let a = ai(&c, SYSTEM, q).await;
+                    send(&c, &token, cid, &a, mid, "").await;
+                }
+                "/ask" => {
+                    if rest.is_empty() {
+                        send(&c, &token, cid, "Напиши вопрос: /ask что такое солянка?", mid, "").await;
+                    } else {
+                        let a = ai(&c, "Отвечай по-русски, кратко и по делу.", rest).await;
+                        send(&c, &token, cid, &a, mid, "").await;
+                    }
+                }
+                "/all" => {
+                    let t = tags(&c, &token, &users, cid).await;
+                    send(&c, &token, cid, if rest.is_empty() { "Все сюда!" } else { rest }, None, &t).await;
+                }
+                "/start" | "/help" => {
+                    send(&c, &token, cid,
+                        "/battle [тема] - вызвать всех на батл\n/mog вопрос - советы по моггингу\n/ask вопрос - обычный ИИ\n/all текст - позвать всех",
+                        mid, "").await;
+                }
+                _ => {}
+            }
+        }
+    }
+}
