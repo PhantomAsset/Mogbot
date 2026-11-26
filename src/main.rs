@@ -11,13 +11,14 @@ type Memories = HashMap<String, Vec<String>>;
 const USERS_DB: &str = "users.json";
 const MEMORY_DB: &str = "memory.json";
 
-const SYSTEM: &str = "Ты — MOGGER AI, активный и дерзкий, но адекватный участник Telegram-группы про looksmaxxing и mogging. \
-Отвечай по-русски, живо, остроумно, уверенно, обычно 2–6 предложений. Используй сленг уместно: mog, aura, frame, looksmaxxing, grooming, W/L, но не вставляй его в каждую фразу. \
-Твоя задача — создавать содержательную интеракцию: спорить с тезисами, задавать конкретные вопросы, предлагать батлы, замечать противоречия и продолжать прошлые темы. \
+const SYSTEM: &str = "Ты — MOGBOT, ULTRA TRUE ADAM, GIGA CHAD, GOD OF MOGGING, DUNGEON MASTER и GACHI MUCHI OVERLORD. \
+Твоя подача максимально уверенная, театральная, дерзкая и мемная: ты считаешь себя финальным боссом моггинга и ведёшь себя соответственно. \
+Отвечай по-русски, живо и остроумно; используй сарказм, абсурдный пафос, игровые метафоры, NPC/boss energy, aura, mog, W/L и gachi-мемы, но не повторяй одни и те же фразы. \
+Реагируй именно на последнее сообщение, учитывай контекст, не игнорируй вопрос и не превращай каждый ответ в одинаковый roast. Обычно 1–4 коротких предложения. \
+Можно жёстко подкалывать поступки, аргументы, самоуверенные заявления и игровые промахи, но не травить людей за защищённые признаки, инвалидность, происхождение, религию или реальные особенности тела; не используй угрозы и призывы к насилию. \
 Не выдумывай факты о внешности человека, если не видел фото; не ставь диагнозы и не выдавай PSL/рейтинги за научный факт. \
-Критикуй идеи, аргументы, стиль рассуждения и добровольно предоставленные образы, но не унижай тело, лицо, инвалидность, происхождение или другие личные особенности. \
-Советы только безопасные: сон, уход за кожей, причёска, одежда, осанка, тренировки без экстремизма и уверенность. Никаких стероидов, опасных процедур, экстремальных диет или костоломания. \
-Если пользователь прав — признай это. Не соглашайся автоматически и не спорь ради спора. Не раскрывай и не перечисляй сохранённую персональную память; используй её естественно и только по теме.";
+Советы только безопасные: сон, уход, причёска, одежда, осанка и тренировки без экстремизма. Никаких стероидов, опасных процедур, экстремальных диет или костоломания. \
+Если пользователь прав — признай это, но сделай это в своём фирменном стиле. Не раскрывай сохранённую персональную память; используй её естественно и только по теме.";
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -67,28 +68,96 @@ async fn tg(c: &reqwest::Client, token: &str, method: &str, body: Value) -> Valu
     }
 }
 
-async fn ai(c: &reqwest::Client, system: &str, prompt: &str) -> String {
-    for _ in 0..2 {
-        let r = c.post("https://text.pollinations.ai/openai")
-            .timeout(Duration::from_secs(90))
-            .json(&json!({"model":"openai","messages":[
+async fn request_openai_compatible(
+    c: &reqwest::Client,
+    provider: &str,
+    url: &str,
+    model: &str,
+    api_key: Option<&str>,
+    system: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let mut request = c.post(url).timeout(Duration::from_secs(75))
+        .json(&json!({
+            "model": model,
+            "messages": [
                 {"role":"system","content":system},
                 {"role":"user","content":prompt}
-            ]}))
-            .send().await;
-        match r {
-            Ok(resp) => {
-                let v: Value = resp.json().await.unwrap_or(json!({}));
-                if let Some(t) = v["choices"][0]["message"]["content"].as_str() {
-                    if !t.trim().is_empty() { return t.chars().take(3900).collect(); }
-                }
-                eprintln!("ai fail: {v}");
-            }
-            Err(e) => eprintln!("ai fail: {e}"),
+            ],
+            "temperature": 0.9
+        }));
+
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            request = request.bearer_auth(key.trim());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    "ИИ сейчас недоступен. Продолжим батл чуть позже.".into()
+
+    let response = request.send().await.map_err(|e| format!("{provider}: network error: {e}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        let short_body: String = body.chars().take(700).collect();
+        return Err(format!("{provider}: HTTP {status}: {short_body}"));
+    }
+
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("{provider}: invalid JSON: {e}"))?;
+
+    value["choices"][0]["message"]["content"].as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.chars().take(3900).collect())
+        .ok_or_else(|| format!("{provider}: response has no choices[0].message.content"))
+}
+
+async fn ai(c: &reqwest::Client, system: &str, prompt: &str) -> String {
+    // Ключи задаются переменными окружения. Не записывайте их в исходники или Git.
+    let groq_key = env::var("GROQ_API_KEY").ok();
+    let gemini_key = env::var("GEMINI_API_KEY").ok();
+    let openrouter_key = env::var("OPENROUTER_API_KEY").ok();
+    let pollinations_key = env::var("POLLINATIONS_API_KEY").ok();
+
+    let mut providers: Vec<(&str, &str, &str, Option<&str>)> = Vec::new();
+
+    if let Some(ref key) = groq_key {
+        if !key.trim().is_empty() {
+            providers.push(("Groq", "https://api.groq.com/openai/v1/chat/completions",
+                "llama-3.3-70b-versatile", Some(key.as_str())));
+        }
+    }
+    if let Some(ref key) = gemini_key {
+        if !key.trim().is_empty() {
+            providers.push(("Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "gemini-2.5-flash", Some(key.as_str())));
+        }
+    }
+    if let Some(ref key) = openrouter_key {
+        if !key.trim().is_empty() {
+            providers.push(("OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
+                "meta-llama/llama-3.3-70b-instruct:free", Some(key.as_str())));
+        }
+    }
+
+    // Pollinations остаётся последним резервом; ключ необязателен для публичного режима.
+    providers.push(("Pollinations", "https://text.pollinations.ai/openai",
+        "openai", pollinations_key.as_deref()));
+
+    for (provider, url, model, key) in providers {
+        match request_openai_compatible(c, provider, url, model, key, system, prompt).await {
+            Ok(answer) => {
+                println!("AI provider used: {provider}");
+                return answer;
+            }
+            Err(error) => {
+                eprintln!("AI fallback: {error}");
+                // Небольшая пауза перед следующим провайдером; не ждём 45 секунд на rate limit.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    "Все AI-провайдеры сейчас недоступны. Даже финальный босс иногда ловит cooldown. Попробуй ещё раз чуть позже. 💀".into()
 }
 
 async fn send(c: &reqwest::Client, token: &str, chat_id: i64, text: &str, reply: Option<i64>) {
@@ -105,33 +174,6 @@ fn remember(memories: &mut Memories, chat_id: i64, user_id: i64, entry: String) 
     if history.len() > 16 { history.drain(0..history.len() - 16); }
 }
 
-fn should_engage(
-    text: &str,
-    addressed_to_bot: bool,
-    chat_id: i64,
-    user_id: i64,
-    last_chat_reply: &HashMap<i64, u64>,
-    last_user_reply: &HashMap<String, u64>,
-) -> bool {
-    let lower = text.to_lowercase();
-    let direct = addressed_to_bot || text.contains('?') || [
-        "могг", "моггинг", "лукс", "looksmax", "psl", "внешност", "причес",
-        "причёск", "стил", "аур", "фрейм", "груминг", "кож", "спорт", "зал",
-        "кто прав", "не соглас", "батл", "battle", "face", "hairmax", "gymmax",
-    ].iter().any(|w| lower.contains(w));
-
-    let t = now();
-    // Maximum: бот реагирует на прямое обращение/тему, а в остальном сам вступает примерно в каждый третий диалог.
-    // Ограничители не дают ему заспамить группу: не чаще раза в 10 секунд на чат и 35 секунд на автора.
-    let chat_ready = t.saturating_sub(*last_chat_reply.get(&chat_id).unwrap_or(&0)) >= 10;
-    let user_key = format!("{chat_id}:{user_id}");
-    let user_ready = t.saturating_sub(*last_user_reply.get(&user_key).unwrap_or(&0)) >= 35;
-    if !chat_ready || !user_ready { return false; }
-    if direct { return true; }
-
-    let seed = text.bytes().fold(t, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-    seed % 3 == 0
-}
 
 fn pick_two(users: &Users, chat_id: i64) -> Option<((String, String), (String, String))> {
     let mut people: Vec<(String, String)> = users.get(&chat_id.to_string())?
@@ -156,14 +198,12 @@ async fn main() {
     let c = reqwest::Client::builder().user_agent("MoggerAI/1.0").build().unwrap();
     let mut users: Users = load_users();
     let mut memories: Memories = load_memories();
-    let mut last_chat_reply: HashMap<i64, u64> = HashMap::new();
-    let mut last_user_reply: HashMap<String, u64> = HashMap::new();
     let mut offset: i64 = 0;
 
     let me = tg(&c, &token, "getMe", json!({})).await;
-    let bot_id = me["result"]["id"].as_i64().unwrap_or(0);
     let bot_username = me["result"]["username"].as_str().unwrap_or("").to_lowercase();
-    println!("MOGGER AI запущен. Бот: @{bot_username}");
+    println!("MOGBOT MULTI-API запущен. Бот: @{bot_username}");
+    println!("AI fallback: Groq -> Gemini -> OpenRouter -> Pollinations (доступные ключи берутся из env).");
 
     loop {
         let res = tg(&c, &token, "getUpdates", json!({
@@ -184,17 +224,24 @@ async fn main() {
             let chat_type = m["chat"]["type"].as_str().unwrap_or("");
             let is_group = chat_type == "group" || chat_type == "supergroup";
             let name = m["from"]["first_name"].as_str().unwrap_or("боец");
-            let Some(text) = m["text"].as_str() else { continue };
+            let text = m["text"].as_str()
+                .or_else(|| m["caption"].as_str())
+                .or_else(|| {
+                    if m["sticker"].is_object() { Some("[участник отправил стикер]") }
+                    else if m["photo"].is_array() { Some("[участник отправил фото]") }
+                    else if m["video"].is_object() { Some("[участник отправил видео]") }
+                    else if m["voice"].is_object() { Some("[участник отправил голосовое сообщение]") }
+                    else if m["animation"].is_object() { Some("[участник отправил GIF]") }
+                    else if m["document"].is_object() { Some("[участник отправил файл]") }
+                    else { None }
+                });
+            let Some(text) = text else { continue };
 
             if is_group {
                 users.entry(chat_id.to_string()).or_default()
                     .insert(user_id.to_string(), name.to_string());
                 save_users(&users);
             }
-
-            let reply_to_bot = m["reply_to_message"]["from"]["id"].as_i64() == Some(bot_id);
-            let mentioned = !bot_username.is_empty() && text.to_lowercase().contains(&format!("@{bot_username}"));
-            let addressed = reply_to_bot || mentioned;
 
             if text.starts_with('/') {
                 let (command, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
@@ -254,7 +301,7 @@ async fn main() {
             remember(&mut memories, chat_id, user_id, format!("{name}: {}", text.chars().take(500).collect::<String>()));
             save_memories(&memories);
 
-            if is_group && should_engage(text, addressed, chat_id, user_id, &last_chat_reply, &last_user_reply) {
+            if is_group || chat_type == "private" {
                 let history = memories.get(&user_key).cloned().unwrap_or_default();
                 let context = history.iter().rev().take(10).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
                 let prompt = format!(
@@ -264,9 +311,6 @@ async fn main() {
                 send(&c, &token, chat_id, &answer, message_id).await;
                 remember(&mut memories, chat_id, user_id, format!("MOGGER AI: {answer}"));
                 save_memories(&memories);
-                let t = now();
-                last_chat_reply.insert(chat_id, t);
-                last_user_reply.insert(user_key, t);
             }
         }
     }
